@@ -206,7 +206,7 @@ namespace MPRecodeLauncher
 
             // По умолчанию: лаунчер лежит в корне игры
             gameDir = self;
-            repoBase = "https://raw.githubusercontent.com/OWNER/MSCMPRecode/main";
+            repoBase = "https://raw.githubusercontent.com/aseramong67-afk/MSCMPRecode/main";
 
             try
             {
@@ -235,7 +235,55 @@ namespace MPRecodeLauncher
             return Encoding.UTF8.GetString(DownloadBytes(url));
         }
 
+        // Основной путь — curl.exe (есть в Windows 10/11): TLS/прокси-заморочек .NET нет
         private static byte[] DownloadBytes(string url)
+        {
+            try
+            {
+                return GetViaCurl(url);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("      curl не смог (" + shortMsg(e) + "), пробую .NET...");
+                return DownloadBytesDotNet(url);
+            }
+        }
+
+        private static byte[] GetViaCurl(string url)
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), "mpr_" + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "curl.exe";
+                psi.Arguments = "-fsSL --retry 2 --max-time 60 -o \"" + tmp + "\" \"" + url + "\"";
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+
+                using (Process p = Process.Start(psi))
+                {
+                    if (!p.WaitForExit(70000))
+                    {
+                        try { p.Kill(); } catch (Exception) { }
+                        throw new Exception("curl timeout 60с");
+                    }
+                    if (p.ExitCode != 0)
+                        throw new Exception("curl exit " + p.ExitCode);
+                }
+                if (!File.Exists(tmp)) throw new Exception("curl не создал файл");
+
+                byte[] data = File.ReadAllBytes(tmp);
+                if (data.Length == 0) throw new Exception("curl вернул 0 байт");
+                return data;
+            }
+            finally
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
+            }
+        }
+
+        // Запасной путь через HttpWebRequest
+        private static byte[] DownloadBytesDotNet(string url)
         {
             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
             req.Timeout = 15000;
