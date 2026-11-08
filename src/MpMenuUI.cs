@@ -25,9 +25,13 @@ namespace MSCMPRecode
         // Состояние панели
         private bool uiInit;
         private string nickInput;
-        private string joinCode;
-        private bool newIsJoin = true;   // кнопка "NewGame" -> JOIN хосту
-        private bool autoHost = true;    // кнопка "Continue" -> авто-хост
+        private bool autoHost = true;    // кнопка "NEW GAME" -> авто-хост + код в буфере
+
+        // Окно ввода кода сессии (кнопка JOIN)
+        private bool joinDialogOpen;
+        private string joinCodeInput = "";
+        private Rect joinRect = new Rect(0, 0, 360, 130);
+        private bool joinFocused;
 
         private void Update()
         {
@@ -43,16 +47,20 @@ namespace MSCMPRecode
                 GameObject root = GameObject.Find("Interface/Buttons");
                 if (root == null) return false;
 
-                HookButton(root.transform, "ButtonContinue", "CONTINUE + HOST",
+                // NEW GAME: старт мира как хост (код сессии копируется в буфер при создании)
+                HookButton(root.transform, "ButtonContinue", "NEW GAME",
                     delegate
                     {
                         if (autoHost) MpManager.QueuePendingConnect(1);
                     }, ref origContinue);
 
-                HookButton(root.transform, "ButtonNewgame", "NEW GAME / JOIN",
+                // JOIN: открываем окошко ввода кода, подключение после входа в мир
+                HookButton(root.transform, "ButtonNewgame", "JOIN",
                     delegate
                     {
-                        if (newIsJoin) MpManager.QueuePendingConnect(2);
+                        joinCodeInput = MpConfig.JoinCode;
+                        joinDialogOpen = true;
+                        joinFocused = false;
                     }, ref origNewgame);
 
                 continueText = FindButtonText(root.transform, "ButtonContinue");
@@ -62,7 +70,6 @@ namespace MSCMPRecode
                 {
                     uiInit = true;
                     nickInput = MpConfig.PlayerName;
-                    joinCode = MpConfig.JoinCode;
                 }
 
                 ModLog.Info("Меню: кнопки Continue/NewGame перехвачены МП-модом.");
@@ -152,31 +159,57 @@ namespace MSCMPRecode
             GUI.Label(new Rect(x + 10, y + 30, 70, 20), "Ник:");
             nickInput = GUI.TextField(new Rect(x + 80, y + 28, W - 92, 20), nickInput ?? "");
 
-            GUI.Label(new Rect(x + 10, y + 54, 70, 20), "Код сессии:");
-            joinCode = GUI.TextField(new Rect(x + 80, y + 52, W - 92, 20), joinCode ?? "");
+            autoHost = GUI.Toggle(new Rect(x + 10, y + 56, W - 20, 18), autoHost,
+                "NEW GAME = создать сессию после входа");
 
-            autoHost = GUI.Toggle(new Rect(x + 10, y + 78, W - 20, 18), autoHost,
-                "Continue = стать ХОСТОМ после входа");
-            bool prevJoin = newIsJoin;
-            newIsJoin = GUI.Toggle(new Rect(x + 10, y + 96, W - 20, 18), newIsJoin,
-                "NewGame = ЗАЙТИ по коду (выкл = обычная новая игра)");
-
-            // Мгновенная реакция подписи "NewGame"
-            if (prevJoin != newIsJoin && newgameText != null)
-                newgameText.text = newIsJoin ? "NEW GAME / JOIN" : (origNewgame.Length > 0 ? origNewgame : "NEW GAME");
-
-            if (GUI.Button(new Rect(x + 10, y + 120, W - 20, 24), "СОХРАНИТЬ НАСТРОЙКИ"))
+            if (GUI.Button(new Rect(x + 10, y + 80, W - 20, 24), "СОХРАНИТЬ НАСТРОЙКИ"))
             {
                 ApplySettings();
             }
 
-            GUI.Label(new Rect(x + 10, y + 150, W - 20, 18),
-                "Кнопки: ПРОДОЛЖИТЬ -> хост, НОВАЯ ИГРА -> join");
+            GUI.Label(new Rect(x + 10, y + 110, W - 20, 18),
+                "Кнопки: NEW GAME -> хост, JOIN -> по коду");
 
-            GUI.Label(new Rect(x + 10, y + 172, W - 20, 50),
-                "Хост: mp host -> код придёт в чат + буфер.\n" +
-                "Клиент: впиши код в поле и войди через НОВАЯ ИГРА.\n" +
-                "Консоль ~: mp join <код> / mp status / mp code");
+            GUI.Label(new Rect(x + 10, y + 132, W - 20, 92),
+                "Хост: NEW GAME -> код придёт в чат\nи сам скопируется в буфер.\n" +
+                "Клиент: JOIN -> впиши код -> вход.\n" +
+                "Консоль ~: mp host / mp join <код> / mp code");
+            if (joinDialogOpen)
+            {
+                joinRect = new Rect((Screen.width - joinRect.width) / 2f,
+                                    (Screen.height - joinRect.height) / 2f, joinRect.width, joinRect.height);
+                GUI.Box(joinRect, "");
+                GUI.Label(new Rect(joinRect.x + 12, joinRect.y + 8, joinRect.width - 24, 20),
+                    "КОД СЕССИИ ХОСТА (NEW GAME у друга):");
+
+                GUI.SetNextControlName("mpjoincode");
+                joinCodeInput = GUI.TextField(new Rect(joinRect.x + 12, joinRect.y + 34, joinRect.width - 24, 22), joinCodeInput ?? "");
+                if (!joinFocused)
+                {
+                    joinFocused = true;
+                    GUI.FocusControl("mpjoincode");
+                }
+
+                if (GUI.Button(new Rect(joinRect.x + 12, joinRect.y + 66, 160, 26), "ВОЙТИ"))
+                {
+                    string code = (joinCodeInput ?? "").Trim();
+                    if (code.Length > 0)
+                    {
+                        MpConfig.JoinCode = code;
+                        MpConfig.Save();
+                        MpManager.QueuePendingConnect(2);
+                        joinDialogOpen = false;
+                    }
+                }
+
+                if (GUI.Button(new Rect(joinRect.x + 184, joinRect.y + 66, joinRect.width - 196, 26), "ОТМЕНА"))
+                {
+                    joinDialogOpen = false;
+                }
+
+                GUI.Label(new Rect(joinRect.x + 12, joinRect.y + 98, joinRect.width - 24, 18),
+                    "Код появится у хоста после mp host / NEW GAME");
+            }
         }
 
         private void ApplySettings()
@@ -184,10 +217,8 @@ namespace MSCMPRecode
             try
             {
                 if (!string.IsNullOrEmpty(nickInput)) MpConfig.PlayerName = nickInput.Trim();
-                MpConfig.JoinCode = (joinCode ?? "").Trim();
                 MpConfig.Save();
-                ModLog.Info("Настройки МП сохранены из меню (ник: " + MpConfig.PlayerName +
-                            ", код: " + MpConfig.JoinCode + ")");
+                ModLog.Info("Настройки МП сохранены из меню (ник: " + MpConfig.PlayerName + ")");
             }
             catch (Exception e)
             {
