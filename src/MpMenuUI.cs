@@ -6,21 +6,17 @@ using HutongGames.PlayMaker;
 namespace MSCMPRecode
 {
     // ==== Меню-UI мода ====
-    // По мотивам BeerMP NetManager.StartMenu: кнопки главного меню — это объекты
-    // Interface/Buttons/ButtonContinue и ButtonNewgame с личным PlayMakerFSM
-    // (стейт "Action", переход "DOWN" -> клик-стейт, TextMesh у child).
-    // Мы НЕ ломаем оригинальные действия загрузки — вставляем наш хук ПЕРВЫМ
-    // действием клик-стейта (он просто запоминает режим МП на после входа в мир)
-    // и меняем подписи кнопок. Плюс IMGUI-панель мода справа вверху.
+    // Схема BeerMP NetManager.StartMenu/InitMenuButton:
+    // - родительский FSM панели Interface/Buttons отключается;
+    // - клик-стейты кнопок ButtonContinue/ButtonNewgame ЗАМЕНЯЮТСЯ ЦЕЛИКОМ
+    //   своим хуком (оригинальные действия меню не стартуют);
+    // - мир грузим сами: Application.LoadLevel("GAME") — так же, как BeerMP;
+    // - NEW GAME -> старт мира как хост (код сессии в буфере по созданию сессии),
+    //   JOIN -> диалог ввода кода -> LoadLevel + mp-подключение после загрузки.
+    // Плюс IMGUI-панель мода справа вверху.
     public class MpMenuUI : MonoBehaviour
     {
         private bool menuDone;
-
-        // Ссылки на подписи кнопок (для переключения режима NewGame)
-        private TextMesh continueText;
-        private TextMesh newgameText;
-        private string origContinue = "";
-        private string origNewgame = "";
 
         // Состояние панели
         private bool uiInit;
@@ -47,24 +43,27 @@ namespace MSCMPRecode
                 GameObject root = GameObject.Find("Interface/Buttons");
                 if (root == null) return false;
 
-                // NEW GAME: старт мира как хост (код сессии копируется в буфер при создании)
-                HookButton(root.transform, "ButtonContinue", "NEW GAME",
-                    delegate
-                    {
-                        if (autoHost) MpManager.QueuePendingConnect(1);
-                    }, ref origContinue);
+                // Схема BeerMP NetManager.StartMenu:
+                // 1) родительский FSM панели отключаем
+                PlayMakerFSM panelPm = root.GetComponent<PlayMakerFSM>();
+                if (panelPm != null) panelPm.enabled = false;
 
-                // JOIN: открываем окошко ввода кода, подключение после входа в мир
-                HookButton(root.transform, "ButtonNewgame", "JOIN",
-                    delegate
-                    {
-                        joinCodeInput = MpConfig.JoinCode;
-                        joinDialogOpen = true;
-                        joinFocused = false;
-                    }, ref origNewgame);
+                // 2) клик-стейты обеих кнопок заменяем ЦЕЛИКОМ своим хуком
+                //    (original actions меню не вызываются — мир грузим сами LoadLevel("GAME"))
+                InitMenuButton(root.transform.Find("ButtonContinue"), "NEW GAME", delegate
+                {
+                    // Хост: старт мира, сессия создаётся после входа, код копируется в буфер
+                    if (autoHost) MpManager.QueuePendingConnect(1);
+                    Application.LoadLevel("GAME");
+                });
 
-                continueText = FindButtonText(root.transform, "ButtonContinue");
-                newgameText = FindButtonText(root.transform, "ButtonNewgame");
+                InitMenuButton(root.transform.Find("ButtonNewgame"), "JOIN", delegate
+                {
+                    joinCodeInput = MpConfig.JoinCode;
+                    joinDialogOpen = true;
+                    joinFocused = false;
+                    // Сам вход в мир происходит в диалоге по «ВОЙТИ» (LoadLevel + pendingConnect)
+                });
 
                 if (!uiInit)
                 {
@@ -72,7 +71,7 @@ namespace MSCMPRecode
                     nickInput = MpConfig.PlayerName;
                 }
 
-                ModLog.Info("Меню: кнопки Continue/NewGame перехвачены МП-модом.");
+                ModLog.Info("Меню: кнопки NEW GAME/JOIN по схеме BeerMP (LoadLevel(\"GAME\")).");
                 return true;
             }
             catch (Exception e)
@@ -82,65 +81,69 @@ namespace MSCMPRecode
             }
         }
 
-        private static TextMesh FindButtonText(Transform root, string buttonName)
+        // Точная копия BeerMP InitMenuButton: заменяет действия и переходы клик-стейта
+        private static void InitMenuButton(Transform parent, string name, Action click)
         {
-            Transform t = root.Find(buttonName);
-            if (t == null || t.childCount == 0) return null;
-            TextMesh tm = t.GetChild(0).GetComponent<TextMesh>();
-            if (tm != null && tm.transform.childCount > 0)
-            {
-                TextMesh tm2 = tm.transform.GetChild(0).GetComponent<TextMesh>();
-                if (tm2 != null) return tm2; // суб/тень — удобнее менять на нём
-            }
-            return tm;
-        }
+            if (parent == null) { ModLog.Warn("Меню: нет кнопки " + name); return; }
 
-        // Вставляет наш хук ПЕРВЫМ в клик-стейт кнопки и меняет подпись
-        private void HookButton(Transform root, string buttonName, string label, Action onClick, ref string origText)
-        {
-            Transform t = root.Find(buttonName);
-            if (t == null) { ModLog.Warn("Меню: нет кнопки " + buttonName); return; }
-
-            PlayMakerFSM pm = t.GetComponent<PlayMakerFSM>();
-            if (pm == null || pm.Fsm == null || pm.FsmStates == null)
+            PlayMakerFSM pm = parent.GetComponent<PlayMakerFSM>();
+            if (pm == null || pm.FsmStates == null || pm.FsmStates.Length == 0 || pm.FsmEvents == null)
             {
-                ModLog.Warn("Меню: нет FSM у кнопки " + buttonName);
+                ModLog.Warn("Меню: нет FSM у кнопки " + name);
                 return;
             }
 
-            // Стейт "Action" и переход "DOWN" -> клик-стейт (как у BeerMP)
             FsmState action = null;
             for (int i = 0; i < pm.FsmStates.Length; i++)
                 if (pm.FsmStates[i].Name == "Action") { action = pm.FsmStates[i]; break; }
-            if (action == null || action.Transitions == null) return;
+            if (action == null || action.Transitions == null) { ModLog.Warn("Меню: нет стейта Action у " + name); return; }
 
-            string clickState = null;
+            string clickStateName = null;
             for (int i = 0; i < action.Transitions.Length; i++)
-                if (action.Transitions[i].EventName == "DOWN")
-                {
-                    clickState = action.Transitions[i].ToState;
-                    break;
-                }
-            if (string.IsNullOrEmpty(clickState)) return;
+                if (action.Transitions[i].EventName == "DOWN") { clickStateName = action.Transitions[i].ToState; break; }
+            if (string.IsNullOrEmpty(clickStateName)) { ModLog.Warn("Меню: нет перехода DOWN у " + name); return; }
 
-            // Хук ВНАЧАЛЕ стейта: не ломаем оригинальную загрузку
-            pm.InsertPmAction(clickState, new PmHook(onClick), 0);
+            FsmState clickState = null;
+            for (int i = 0; i < pm.FsmStates.Length; i++)
+                if (pm.FsmStates[i].Name == clickStateName) { clickState = pm.FsmStates[i]; break; }
+            if (clickState == null) { ModLog.Warn("Меню: нет клик-стейта " + clickStateName); return; }
 
-            // Подпись: TextMesh у первого ребёнка (+ суб, как у BeerMP)
-            if (t.childCount > 0)
+            // Переходы клик-стейта: только FINISHED -> начальный стейт
+            FsmEvent finished = null;
+            for (int i = 0; i < pm.FsmEvents.Length; i++)
+                if (pm.FsmEvents[i].Name == "FINISHED") { finished = pm.FsmEvents[i]; break; }
+            if (finished == null) { ModLog.Warn("Меню: нет события FINISHED у " + name); return; }
+
+            clickState.Transitions = new FsmTransition[]
             {
-                TextMesh tm = t.GetChild(0).GetComponent<TextMesh>();
+                new FsmTransition
+                {
+                    FsmEvent = finished,
+                    ToState = pm.FsmStates[0].Name
+                }
+            };
+            clickState.Actions = new FsmStateAction[]
+            {
+                new PmHook(click),
+                new HutongGames.PlayMaker.Actions.Wait { time = 0.2f }
+            };
+
+            // Подписи: TextMesh у первого ребёнка (+ суб/тень)
+            if (parent.childCount > 0)
+            {
+                TextMesh tm = parent.GetChild(0).GetComponent<TextMesh>();
                 if (tm != null)
                 {
-                    if (origText.Length == 0) origText = tm.text;
-                    tm.text = label;
+                    tm.text = name;
                     if (tm.transform.childCount > 0)
                     {
                         TextMesh tm2 = tm.transform.GetChild(0).GetComponent<TextMesh>();
-                        if (tm2 != null) tm2.text = label;
+                        if (tm2 != null) tm2.text = name;
                     }
                 }
             }
+
+            ModLog.Info("Меню: кнопка '" + name + "' перепристроена (клик-стейт " + clickStateName + ").");
         }
 
         // ==== IMGUI-панель мода (видна в главном меню) ====
@@ -176,6 +179,10 @@ namespace MSCMPRecode
                 "Консоль ~: mp host / mp join <код> / mp code");
             if (joinDialogOpen)
             {
+                // Esc — отмена
+                if (Event.current.type == EventType.keyDown && Event.current.keyCode == KeyCode.Escape)
+                    joinDialogOpen = false;
+
                 joinRect = new Rect((Screen.width - joinRect.width) / 2f,
                                     (Screen.height - joinRect.height) / 2f, joinRect.width, joinRect.height);
                 GUI.Box(joinRect, "");
@@ -190,7 +197,10 @@ namespace MSCMPRecode
                     GUI.FocusControl("mpjoincode");
                 }
 
-                if (GUI.Button(new Rect(joinRect.x + 12, joinRect.y + 66, 160, 26), "ВОЙТИ"))
+                bool tryJoin = GUI.Button(new Rect(joinRect.x + 12, joinRect.y + 66, 160, 26), "ВОЙТИ");
+                if (Event.current.type == EventType.keyDown && Event.current.keyCode == KeyCode.Return)
+                    tryJoin = true;
+                if (tryJoin)
                 {
                     string code = (joinCodeInput ?? "").Trim();
                     if (code.Length > 0)
@@ -199,6 +209,8 @@ namespace MSCMPRecode
                         MpConfig.Save();
                         MpManager.QueuePendingConnect(2);
                         joinDialogOpen = false;
+                        // Вход в мир (свой сейв) — после загрузки TryApplyPendingConnect подключится по коду
+                        Application.LoadLevel("GAME");
                     }
                 }
 
@@ -208,7 +220,7 @@ namespace MSCMPRecode
                 }
 
                 GUI.Label(new Rect(joinRect.x + 12, joinRect.y + 98, joinRect.width - 24, 18),
-                    "Код появится у хоста после mp host / NEW GAME");
+                    "Код появится у хоста после mp host / NEW GAME (Esc — отмена)");
             }
         }
 
