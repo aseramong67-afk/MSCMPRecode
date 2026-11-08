@@ -550,6 +550,9 @@ namespace MSCMPRecode
         private static CSteamID lobby;
         private static string lobbyCode;
         private static bool joiningLobby;   // клиент: ждём LobbyDataUpdate -> JoinLobby (схема BeerMP)
+        private static SteamAPICall_t createCall;       // CreateLobby: контроль ответа Steam
+        private static double createCallStarted;
+        private static double createWatchLast;
         private static List<CSteamID> connections = new List<CSteamID>();
 
         public static CSteamID LobbyId { get { return lobby; } }
@@ -592,8 +595,9 @@ namespace MSCMPRecode
             EnsureInit();
             Host = new MpSteamHost();
             Client = null;
-            SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePublic, Math.Max(2, maxPlayers));
-            ModLog.Info("Steam: создаю лобби (код-сессия появится после ответа Steam)...");
+            createCall = SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePublic, Math.Max(2, maxPlayers));
+            createCallStarted = NowMs();
+            ModLog.Info("Steam: создаю лобби... (APICall " + createCall.m_SteamAPICall + ")");
         }
 
         // ==== Клиент: войти по коду ====
@@ -652,6 +656,8 @@ namespace MSCMPRecode
             // Клиент: дожимаем Hello, пока нет Welcome
             if (Client != null) Client.RetryHello();
 
+            WatchCreateLobby();
+
             try
             {
                 uint size;
@@ -673,6 +679,42 @@ namespace MSCMPRecode
             }
         }
 
+        // Контроль CreateLobby: вызов «висит» или Steam вернул ошибку API?
+        private static void WatchCreateLobby()
+        {
+            if (createCall.m_SteamAPICall == 0) return;
+            try
+            {
+                bool done;
+                if (SteamUtils.IsAPICallCompleted(createCall, out done) && done)
+                {
+                    ESteamAPICallFailure fr = SteamUtils.GetAPICallFailureReason(createCall);
+                    createCall = new SteamAPICall_t(0);
+                    if (fr == ESteamAPICallFailure.k_ESteamAPICallFailureNone)
+                        ModLog.Info("Steam: CreateLobby подтверждён (ждём LobbyCreated)...");
+                    else
+                        ModLog.Error("Steam: CreateLobby ОШИБКА: " + fr);
+                    return;
+                }
+                double waited = (NowMs() - createCallStarted) / 1000.0;
+                if (NowMs() - createWatchLast >= 3000 && waited > 3)
+                {
+                    createWatchLast = NowMs();
+                    ModLog.Warn("Steam: CreateLobby висит " + (int)waited + " с — Steam не отвечает...");
+                }
+            }
+            catch (Exception e)
+            {
+                ModLog.Warn("CreateLobby watch: " + e.Message);
+                createCall = new SteamAPICall_t(0);
+            }
+        }
+
+        private static double NowMs()
+        {
+            return (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+        }
+
         public static bool Send(CSteamID to, byte[] body, bool reliable)
         {
             try
@@ -691,6 +733,7 @@ namespace MSCMPRecode
         // ==== Коллбэки ====
         private static void OnLobbyCreated(LobbyCreated_t cb)
         {
+            createCall = new SteamAPICall_t(0);
             if (cb.m_eResult != EResult.k_EResultOK)
             {
                 ModLog.Error("Steam: лобби не создалось: " + cb.m_eResult);
@@ -713,6 +756,8 @@ namespace MSCMPRecode
 
         private static void OnLobbyEnter(LobbyEnter_t cb)
         {
+            createCall = new SteamAPICall_t(0);
+            joiningLobby = false;
             if (cb.m_EChatRoomEnterResponse != 1)
             {
                 ModLog.Error("Steam: не войти в сессию: " + (EChatRoomEnterResponse)cb.m_EChatRoomEnterResponse);
