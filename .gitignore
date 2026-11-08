@@ -1,0 +1,12 @@
+# Декомпилированные сторонние исходники (BeerMP / MSCLoader) — в репозиторий не входим
+beermp-src/
+mscloader-src/
+mscloader-pre-src/
+
+# Артефакты сборки и тестовые exe
+test/*.exe
+*.log
+launcher-log.txt
+
+# Локальные временные файлы
+*.tmp
